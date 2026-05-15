@@ -4,6 +4,7 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives import padding as sym_padding
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.exceptions import InvalidSignature
 
 
 
@@ -96,3 +97,48 @@ def aes_cbc_decrypt(iv_and_ciphertext, key):
     plaintext = unpadder.update(padded) + unpadder.finalize()
 
     return plaintext
+
+def rsa_pss_sign(message, private_key):
+    # Pre: message is bytes and private_key is an RSA private key object
+    # Post: returns RSA-PSS signature bytes
+    return private_key.sign(
+        message,
+        padding.PSS(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH,
+        ),
+        hashes.SHA256(),
+    )
+
+
+def rsa_pss_verify(message, signature, public_key):
+    # Pre: message is bytes, signature is bytes, and public_key is an RSA public key object
+    # Post: returns True if the signature is valid, otherwise returns False
+    try:
+        public_key.verify(
+            signature,
+            message,
+            padding.PSS(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+        return True
+    except InvalidSignature:
+        return False
+    
+def dsa_sign(message, private_key):
+    # Pre: message is bytes and private_key is a DSA private key object
+    # Post: returns DSA signature bytes
+    return private_key.sign(message, hashes.SHA256())
+
+
+def dsa_verify(message, signature, public_key):
+    # Pre: message is bytes, signature is bytes, and public_key is a DSA public key object
+    # Post: returns True if the signature is valid, otherwise returns False
+    try:
+        public_key.verify(signature, message, hashes.SHA256())
+        return True
+    except InvalidSignature:
+        return False
