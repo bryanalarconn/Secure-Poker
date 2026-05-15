@@ -1,5 +1,7 @@
 # https://cryptography.io/en/latest/hazmat/primitives/asymmetric/serialization/
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+
 
 
 def load_rsa_private_key(path):
@@ -32,3 +34,28 @@ def load_dsa_public_key(path):
     with open(path, "rb") as f:
         pem_bytes = f.read()
     return serialization.load_pem_public_key(pem_bytes)
+
+def rsa_oaep_encrypt(plaintext, public_key):
+    # Pre:  plaintext is bytes, len(plaintext) <= 190, public_key is an RSAPublicKey object
+    # Post: returns ciphertext bytes of length key_size_bytes (256 for RSA-2048)
+    return public_key.encrypt(
+        plaintext,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None,   # optional context binding; unused here
+        ),
+    )
+ 
+ 
+def rsa_oaep_decrypt(ciphertext, private_key):
+    # Pre:  ciphertext is bytes of length key_size_bytes
+    # Post: returns the original plaintext bytes, raises error if padding is invalid
+    return private_key.decrypt(
+        ciphertext,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None,
+        ),
+    )
