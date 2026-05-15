@@ -1,6 +1,10 @@
 # https://cryptography.io/en/latest/hazmat/primitives/asymmetric/serialization/
+import os
 from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives import padding as sym_padding
 from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
 
 
 
@@ -36,21 +40,20 @@ def load_dsa_public_key(path):
     return serialization.load_pem_public_key(pem_bytes)
 
 def rsa_oaep_encrypt(plaintext, public_key):
-    # Pre:  plaintext is bytes, len(plaintext) <= 190, public_key is an RSAPublicKey object
-    # Post: returns ciphertext bytes of length key_size_bytes (256 for RSA-2048)
+    # Pre: plaintext is bytes and public_key is an RSA public key object
+    # Post: returns RSA-OAEP encrypted ciphertext bytes
     return public_key.encrypt(
         plaintext,
         padding.OAEP(
             mgf=padding.MGF1(algorithm=hashes.SHA256()),
             algorithm=hashes.SHA256(),
-            label=None,   # optional context binding; unused here
+            label=None,
         ),
     )
- 
- 
+
 def rsa_oaep_decrypt(ciphertext, private_key):
-    # Pre:  ciphertext is bytes of length key_size_bytes
-    # Post: returns the original plaintext bytes, raises error if padding is invalid
+    # Pre: ciphertext is bytes and private_key is an RSA private key object
+    # Post: returns the decrypted plaintext bytes
     return private_key.decrypt(
         ciphertext,
         padding.OAEP(
@@ -59,3 +62,37 @@ def rsa_oaep_decrypt(ciphertext, private_key):
             label=None,
         ),
     )
+
+def aes_cbc_encrypt(plaintext, key):
+    # Pre: plaintext is bytes and key is 32 bytes
+    # Post: returns IV and AES-CBC ciphertext as one bytes object
+    iv = os.urandom(16)
+
+    # Pad plaintext to a multiple of AES block size
+    padder = sym_padding.PKCS7(algorithms.AES.block_size).padder()
+    padded = padder.update(plaintext) + padder.finalize()
+
+    # Encrypt the padded plaintext
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+    encryptor = cipher.encryptor()
+    ciphertext = encryptor.update(padded) + encryptor.finalize()
+
+    return iv + ciphertext
+
+
+def aes_cbc_decrypt(iv_and_ciphertext, key):
+    # Pre: iv_and_ciphertext contains the IV followed by ciphertext, and key is 32 bytes
+    # Post: returns the decrypted plaintext bytes
+    iv = iv_and_ciphertext[:16]
+    ciphertext = iv_and_ciphertext[16:]
+
+    # Decrypt the ciphertext
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+    decryptor = cipher.decryptor()
+    padded = decryptor.update(ciphertext) + decryptor.finalize()
+
+    # Remove padding from the plaintext
+    unpadder = sym_padding.PKCS7(algorithms.AES.block_size).unpadder()
+    plaintext = unpadder.update(padded) + unpadder.finalize()
+
+    return plaintext
