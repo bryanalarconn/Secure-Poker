@@ -1,4 +1,4 @@
-import random
+import secrets
 
 # card values go from 1 to 15
 CARD_MIN = 1
@@ -17,10 +17,11 @@ P2_WIN = "player2"
 TIE = "tie"
 DRAW = "draw"
 
+# replaces random.sample(), too predictable and unfit for cryptographic use
+_secure_rng = secrets.SystemRandom()
 
 def deal_hand():
-    # deal 3 random cards with no repeats
-    return random.sample(range(CARD_MIN, CARD_MAX + 1), HAND_SIZE)
+    return _secure_rng.sample(range(CARD_MIN, CARD_MAX + 1), HAND_SIZE)
 
 
 def validate_choice(choice, hand):
