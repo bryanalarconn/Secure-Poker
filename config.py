@@ -37,8 +37,8 @@ VALID_SIG_SCHEMES = (SIG_SCHEME_RSA, SIG_SCHEME_DSA)
 
 # file paths
 KEYS_DIR = "keys"
-HOUSE_PRIVATE_KEY = "house_private.pem"
-HOUSE_PUBLIC_KEY = "house_public.pem"
+HOUSE_OAEP_PRIVATE_KEY = "house_oaep_private.pem"
+HOUSE_OAEP_PUBLIC_KEY = "house_oaep_public.pem"
 
 # player key files use this pattern:
 # player{N}_{scheme}_{private|public}.pem
