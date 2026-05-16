@@ -8,17 +8,20 @@ import protocol
 
 
 # player session state
+
 class PlayerSession:
     def __init__(self, player_id, sock, addr):
         # Pre: player_id is a string, sock is a connected socket, and addr is the peer address
-        # Post: creates a player session with connection details
+        # Post: creates a player session with connection details and replay tracking
         self.player_id = player_id
         self.sock = sock
         self.addr = addr
         self.session_key = None
+        self.nonce_tracker = protocol.NonceTracker()
 
 
 # shared game state
+
 class GameState:
     def __init__(self):
         # Pre: none
@@ -26,12 +29,46 @@ class GameState:
         self.barrier = threading.Barrier(config.NUM_PLAYERS)
         self.round_results = []
 
+
+# signature scheme selection
+def prompt_signature_scheme():
+    # Pre: none
+    # Post: returns the selected signature scheme
+    print("[house] Select signature scheme for this game:")
+    print("  1 - RSA (PSS)")
+    print("  2 - DSA")
+
+    while True:
+        choice = input("[house] enter 1 or 2: ").strip()
+
+        if choice == "1":
+            return config.SIG_SCHEME_RSA
+
+        if choice == "2":
+            return config.SIG_SCHEME_DSA
+
+        print("[house] invalid choice - enter 1 or 2")
+
+
 # key loading
 def load_house_oaep_key():
     # Pre: the house OAEP private key file exists in the keys directory
     # Post: returns the house RSA private key object
     path = os.path.join(config.KEYS_DIR, config.HOUSE_OAEP_PRIVATE_KEY)
     return crypto_utils.load_rsa_private_key(path)
+
+
+def load_player_public_key(player_id, scheme):
+    # Pre: player_id is a string and scheme is a valid signature scheme
+    # Post: returns the player's public signing key
+    filename = f"{player_id}_{scheme}_public.pem"
+    path = os.path.join(config.KEYS_DIR, filename)
+
+    if scheme == config.SIG_SCHEME_RSA:
+        return crypto_utils.load_rsa_public_key(path)
+
+    return crypto_utils.load_dsa_public_key(path)
+
 
 # session key exchange
 def receive_session_key(session, house_oaep_priv):
@@ -45,18 +82,42 @@ def receive_session_key(session, house_oaep_priv):
     print(f"[house] {session.player_id} session key received ({len(session_key)} bytes)")
 
 
-# player handler
+# signed hello verification
+def receive_signed_hello(session, player_pub, scheme):
+    # Pre: session has a session key, player_pub is loaded, and scheme is valid
+    # Post: returns the verified hello message dict
+    ciphertext = protocol.recv_frame(session.sock)
 
-def handle_player(session, game, house_oaep_priv):
-    # Pre: session is a PlayerSession, game is the shared GameState, and house_oaep_priv is loaded
-    # Post: handles the player's session key setup and closes the socket
+    bundle = crypto_utils.aes_cbc_decrypt(ciphertext, session.session_key)
+    msg_bytes, signature = bundle.split(b"||", 1)
+
+    if not protocol.verify(msg_bytes, signature, player_pub, scheme):
+        raise ValueError("signature verification failed")
+
+    msg = protocol.deserialize(msg_bytes)
+
+    if not session.nonce_tracker.check_and_record(msg["nonce"], msg["timestamp"]):
+        raise ValueError("replay or stale message rejected")
+
+    print(f"[house] {session.player_id} signed hello verified")
+    return msg
+
+
+# player handler
+def handle_player(session, game, house_oaep_priv, player_pub, scheme):
+    # Pre: session, game, house_oaep_priv, player_pub, and scheme are valid
+    # Post: handles player setup and closes the socket
     print(f"[house] {session.player_id} connected from {session.addr}")
 
     try:
         receive_session_key(session, house_oaep_priv)
+        receive_signed_hello(session, player_pub, scheme)
 
-    except (OSError, ConnectionError, ValueError) as e:
-        print(f"[house] {session.player_id} error during session setup: {e}")
+    except OSError as e:
+        print(f"[house] {session.player_id} socket error: {e}")
+
+    except Exception as e:
+        print(f"[house] {session.player_id} rejected: {e}")
 
     finally:
         session.sock.close()
@@ -64,14 +125,27 @@ def handle_player(session, game, house_oaep_priv):
 
 
 # main server
-
 def main():
     # Pre: config contains valid server settings and key file names
     # Post: starts the house server, accepts players, and shuts down cleanly
     print("[house] Secure Internet Poker - House server")
 
-    house_oaep_priv = load_house_oaep_key()
-    print("[house] OAEP private key loaded")
+    scheme = prompt_signature_scheme()
+    print(f"[house] signature scheme: {scheme.upper()}")
+
+    try:
+        house_oaep_priv = load_house_oaep_key()
+
+        player_pubs = {
+            "player1": load_player_public_key("player1", scheme),
+            "player2": load_player_public_key("player2", scheme),
+        }
+
+        print("[house] keys loaded")
+
+    except FileNotFoundError as e:
+        print(f"[house] ERROR: missing key file ({e}) - run generate_keys.py first")
+        return
 
     game = GameState()
     threads = []
@@ -94,14 +168,20 @@ def main():
 
             thread = threading.Thread(
                 target=handle_player,
-                args=(session, game, house_oaep_priv),
+                args=(
+                    session,
+                    game,
+                    house_oaep_priv,
+                    player_pubs[player_id],
+                    scheme,
+                ),
                 name=f"{player_id}-thread",
             )
 
             thread.start()
             threads.append(thread)
 
-        print(f"[house] {config.NUM_PLAYERS} players connected - game would start here")
+        print(f"[house] {config.NUM_PLAYERS} players connected")
 
         for thread in threads:
             thread.join()
