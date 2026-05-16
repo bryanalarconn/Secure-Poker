@@ -12,13 +12,14 @@ import protocol
 class PlayerSession:
     def __init__(self, player_id, sock, addr):
         # Pre: player_id is a string, sock is a connected socket, and addr is the peer address
-        # Post: creates a player session with connection details, replay tracking, and hand storage
+        # Post: creates a player session with connection details, replay tracking, hand storage, and move storage
         self.player_id = player_id
         self.sock = sock
         self.addr = addr
         self.session_key = None
         self.nonce_tracker = protocol.NonceTracker()
         self.hand = None
+        self.current_move = None
 
 
 # shared game state
@@ -28,6 +29,8 @@ class GameState:
         # Post: creates shared coordination state for both player threads
         self.barrier = threading.Barrier(config.NUM_PLAYERS)
         self.round_results = []
+        self.p1_session = None
+        self.p2_session = None
 
 
 # signature scheme selection
@@ -68,7 +71,6 @@ def load_house_signing_key(scheme):
         return crypto_utils.load_rsa_private_key(path)
 
     return crypto_utils.load_dsa_private_key(path)
-
 
 def load_player_public_key(player_id, scheme):
     # Pre: player_id is a string and scheme is a valid signature scheme
@@ -147,22 +149,86 @@ def deal_and_send_hand(session, house_signing_priv, scheme):
     print(f"[house] {session.player_id} dealt hand: {hand}")
 
 
+# move receiving
+def receive_move(session, player_pub, scheme, round_num):
+    # Pre: session has a session key, hand, and nonce tracker, and player_pub and scheme are valid
+    # Post: stores the player's validated move in the session
+    ciphertext = protocol.recv_frame(session.sock)
+
+    bundle = crypto_utils.aes_cbc_decrypt(ciphertext, session.session_key)
+    msg_bytes, signature = bundle.split(b"||", 1)
+
+    if not protocol.verify(msg_bytes, signature, player_pub, scheme):
+        raise ValueError("move signature verification failed")
+
+    msg = protocol.deserialize(msg_bytes)
+
+    if not session.nonce_tracker.check_and_record(msg["nonce"], msg["timestamp"]):
+        raise ValueError("replay or stale move rejected")
+
+    card = msg["payload"]["card"]
+
+    if not game_logic.validate_choice(card, session.hand):
+        raise ValueError(f"illegal move: {card} not in hand {session.hand}")
+
+    session.current_move = card
+    print(f"[house] {session.player_id} played {card} (round {round_num})")
+
+
+# round play
+def play_round(session, game, player_pub, house_signing_priv, scheme, round_num):
+    # Pre: session is fully set up, game is shared, and round_num is valid
+    # Post: receives the player's move, compares the round, and sends the result
+    receive_move(session, player_pub, scheme, round_num)
+
+    game.barrier.wait()
+
+    is_leader = session.player_id == "player1"
+
+    if is_leader:
+        p1_move = game.p1_session.current_move
+        p2_move = game.p2_session.current_move
+
+        result = game_logic.compare_round(p1_move, p2_move)
+        game.round_results.append(result)
+
+        print(f"[house] round {round_num} result: P1={p1_move} P2={p2_move} -> {result}")
+
+    game.barrier.wait()
+
+    result = game.round_results[round_num - 1]
+
+    send_signed_message(
+        session.sock,
+        protocol.MSG_ROUND_RESULT,
+        {"round": round_num, "result": result},
+        session.session_key,
+        house_signing_priv,
+        scheme,
+    )
+
+
 # player handler
 def handle_player(session, game, house_oaep_priv, house_signing_priv, player_pub, scheme):
     # Pre: session, game, house_oaep_priv, house_signing_priv, player_pub, and scheme are valid
-    # Post: handles player setup, sends the player's hand, and closes the socket
+    # Post: handles player setup, one round of play, and closes the socket
     print(f"[house] {session.player_id} connected from {session.addr}")
 
     try:
         receive_session_key(session, house_oaep_priv)
         receive_signed_hello(session, player_pub, scheme)
         deal_and_send_hand(session, house_signing_priv, scheme)
+        play_round(session, game, player_pub, house_signing_priv, scheme, 1)
+
+    except threading.BrokenBarrierError:
+        print(f"[house] {session.player_id} aborted: other player failed")
 
     except OSError as e:
         print(f"[house] {session.player_id} socket error: {e}")
 
     except Exception as e:
         print(f"[house] {session.player_id} rejected: {e}")
+        game.barrier.abort()
 
     finally:
         session.sock.close()
@@ -172,7 +238,7 @@ def handle_player(session, game, house_oaep_priv, house_signing_priv, player_pub
 # main server
 def main():
     # Pre: config contains valid server settings and key file names
-    # Post: starts the house server, accepts players, and shuts down cleanly
+    # Post: starts the house server, accepts players, runs one round, and shuts down cleanly
     print("[house] Secure Internet Poker - House server")
 
     scheme = prompt_signature_scheme()
@@ -211,6 +277,11 @@ def main():
             player_id = f"player{i + 1}"
 
             session = PlayerSession(player_id, client_sock, addr)
+
+            if player_id == "player1":
+                game.p1_session = session
+            else:
+                game.p2_session = session
 
             thread = threading.Thread(
                 target=handle_player,
