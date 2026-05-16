@@ -4,24 +4,24 @@ import threading
 
 import config
 import crypto_utils
+import game_logic
 import protocol
 
 
 # player session state
-
 class PlayerSession:
     def __init__(self, player_id, sock, addr):
         # Pre: player_id is a string, sock is a connected socket, and addr is the peer address
-        # Post: creates a player session with connection details and replay tracking
+        # Post: creates a player session with connection details, replay tracking, and hand storage
         self.player_id = player_id
         self.sock = sock
         self.addr = addr
         self.session_key = None
         self.nonce_tracker = protocol.NonceTracker()
+        self.hand = None
 
 
 # shared game state
-
 class GameState:
     def __init__(self):
         # Pre: none
@@ -58,6 +58,18 @@ def load_house_oaep_key():
     return crypto_utils.load_rsa_private_key(path)
 
 
+def load_house_signing_key(scheme):
+    # Pre: scheme is a valid signature scheme and the house signing key file exists
+    # Post: returns the house private signing key object
+    filename = f"house_{scheme}_private.pem"
+    path = os.path.join(config.KEYS_DIR, filename)
+
+    if scheme == config.SIG_SCHEME_RSA:
+        return crypto_utils.load_rsa_private_key(path)
+
+    return crypto_utils.load_dsa_private_key(path)
+
+
 def load_player_public_key(player_id, scheme):
     # Pre: player_id is a string and scheme is a valid signature scheme
     # Post: returns the player's public signing key
@@ -68,6 +80,20 @@ def load_player_public_key(player_id, scheme):
         return crypto_utils.load_rsa_public_key(path)
 
     return crypto_utils.load_dsa_public_key(path)
+
+
+# signed message sending
+def send_signed_message(sock, msg_type, payload, session_key, house_signing_priv, scheme):
+    # Pre: sock is connected, session_key is bytes, house_signing_priv is loaded, and scheme is valid
+    # Post: sends a signed and encrypted message over the socket
+    msg = protocol.build_message(msg_type, "house", payload)
+    msg_bytes = protocol.serialize(msg)
+
+    signature = protocol.sign(msg_bytes, house_signing_priv, scheme)
+    bundle = msg_bytes + b"||" + signature
+
+    ciphertext = crypto_utils.aes_cbc_encrypt(bundle, session_key)
+    protocol.send_frame(sock, ciphertext)
 
 
 # session key exchange
@@ -102,16 +128,35 @@ def receive_signed_hello(session, player_pub, scheme):
     print(f"[house] {session.player_id} signed hello verified")
     return msg
 
+# hand distribution
+def deal_and_send_hand(session, house_signing_priv, scheme):
+    # Pre: session has a session key, house_signing_priv is loaded, and scheme is valid
+    # Post: stores this player's hand and sends it as a signed encrypted message
+    hand = game_logic.deal_hand()
+    session.hand = hand
+
+    send_signed_message(
+        session.sock,
+        protocol.MSG_HAND,
+        {"cards": hand},
+        session.session_key,
+        house_signing_priv,
+        scheme,
+    )
+
+    print(f"[house] {session.player_id} dealt hand: {hand}")
+
 
 # player handler
-def handle_player(session, game, house_oaep_priv, player_pub, scheme):
-    # Pre: session, game, house_oaep_priv, player_pub, and scheme are valid
-    # Post: handles player setup and closes the socket
+def handle_player(session, game, house_oaep_priv, house_signing_priv, player_pub, scheme):
+    # Pre: session, game, house_oaep_priv, house_signing_priv, player_pub, and scheme are valid
+    # Post: handles player setup, sends the player's hand, and closes the socket
     print(f"[house] {session.player_id} connected from {session.addr}")
 
     try:
         receive_session_key(session, house_oaep_priv)
         receive_signed_hello(session, player_pub, scheme)
+        deal_and_send_hand(session, house_signing_priv, scheme)
 
     except OSError as e:
         print(f"[house] {session.player_id} socket error: {e}")
@@ -135,6 +180,7 @@ def main():
 
     try:
         house_oaep_priv = load_house_oaep_key()
+        house_signing_priv = load_house_signing_key(scheme)
 
         player_pubs = {
             "player1": load_player_public_key("player1", scheme),
@@ -172,6 +218,7 @@ def main():
                     session,
                     game,
                     house_oaep_priv,
+                    house_signing_priv,
                     player_pubs[player_id],
                     scheme,
                 ),
