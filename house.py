@@ -1,7 +1,10 @@
+import os
 import socket
 import threading
 
 import config
+import crypto_utils
+import protocol
 
 
 # player session state
@@ -12,6 +15,7 @@ class PlayerSession:
         self.player_id = player_id
         self.sock = sock
         self.addr = addr
+        self.session_key = None
 
 
 # shared game state
@@ -22,18 +26,37 @@ class GameState:
         self.barrier = threading.Barrier(config.NUM_PLAYERS)
         self.round_results = []
 
+# key loading
+def load_house_oaep_key():
+    # Pre: the house OAEP private key file exists in the keys directory
+    # Post: returns the house RSA private key object
+    path = os.path.join(config.KEYS_DIR, config.HOUSE_OAEP_PRIVATE_KEY)
+    return crypto_utils.load_rsa_private_key(path)
+
+# session key exchange
+def receive_session_key(session, house_oaep_priv):
+    # Pre: session is connected and house_oaep_priv is the house RSA private key
+    # Post: stores this player's AES session key in the session
+    encrypted_key = protocol.recv_frame(session.sock)
+
+    session_key = crypto_utils.rsa_oaep_decrypt(encrypted_key, house_oaep_priv)
+    session.session_key = session_key
+
+    print(f"[house] {session.player_id} session key received ({len(session_key)} bytes)")
+
 
 # player handler
-def handle_player(session, game):
-    # Pre: session is a PlayerSession and game is the shared GameState
-    # Post: handles the player connection and closes the socket
+
+def handle_player(session, game, house_oaep_priv):
+    # Pre: session is a PlayerSession, game is the shared GameState, and house_oaep_priv is loaded
+    # Post: handles the player's session key setup and closes the socket
     print(f"[house] {session.player_id} connected from {session.addr}")
 
     try:
-        session.sock.recv(config.MAX_MESSAGE_SIZE)
+        receive_session_key(session, house_oaep_priv)
 
-    except OSError as e:
-        print(f"[house] {session.player_id} socket error: {e}")
+    except (OSError, ConnectionError, ValueError) as e:
+        print(f"[house] {session.player_id} error during session setup: {e}")
 
     finally:
         session.sock.close()
@@ -41,10 +64,14 @@ def handle_player(session, game):
 
 
 # main server
+
 def main():
-    # Pre: config contains valid host, port, and player count values
-    # Post: starts the house server and accepts player connections
+    # Pre: config contains valid server settings and key file names
+    # Post: starts the house server, accepts players, and shuts down cleanly
     print("[house] Secure Internet Poker - House server")
+
+    house_oaep_priv = load_house_oaep_key()
+    print("[house] OAEP private key loaded")
 
     game = GameState()
     threads = []
@@ -67,7 +94,7 @@ def main():
 
             thread = threading.Thread(
                 target=handle_player,
-                args=(session, game),
+                args=(session, game, house_oaep_priv),
                 name=f"{player_id}-thread",
             )
 
