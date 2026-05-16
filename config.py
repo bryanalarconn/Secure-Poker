@@ -4,6 +4,9 @@ PORT = 50007
 LENGTH_PREFIX_SIZE = 4
 MAX_MESSAGE_SIZE = 65536
 
+# game settings
+NUM_PLAYERS = 2
+
 
 # rsa settings
 RSA_KEY_SIZE = 2048
