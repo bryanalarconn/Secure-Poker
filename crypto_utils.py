@@ -1,5 +1,6 @@
 # https://cryptography.io/en/latest/hazmat/primitives/asymmetric/serialization/
 import os
+import config
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives import padding as sym_padding
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -67,7 +68,7 @@ def rsa_oaep_decrypt(ciphertext, private_key):
 def aes_cbc_encrypt(plaintext, key):
     # Pre: plaintext is bytes and key is 32 bytes
     # Post: returns IV and AES-CBC ciphertext as one bytes object
-    iv = os.urandom(16)
+    iv = os.urandom(config.IV_SIZE)
 
     # Pad plaintext to a multiple of AES block size
     padder = sym_padding.PKCS7(algorithms.AES.block_size).padder()
@@ -84,8 +85,8 @@ def aes_cbc_encrypt(plaintext, key):
 def aes_cbc_decrypt(iv_and_ciphertext, key):
     # Pre: iv_and_ciphertext contains the IV followed by ciphertext, and key is 32 bytes
     # Post: returns the decrypted plaintext bytes
-    iv = iv_and_ciphertext[:16]
-    ciphertext = iv_and_ciphertext[16:]
+    iv = iv_and_ciphertext[:config.IV_SIZE]
+    ciphertext = iv_and_ciphertext[config.IV_SIZE:]
 
     # Decrypt the ciphertext
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
