@@ -86,7 +86,6 @@ def send_signed_hello(sock, player_id, session_key, player_signing_priv, scheme)
         {"player_id": player_id},
     )
     msg_bytes = protocol.serialize(msg)
-
     # sign-then-encrypt: sign the plaintext first, then encrypt the bundle
     signature = protocol.sign(msg_bytes, player_signing_priv, scheme)
     bundle = msg_bytes + b"||" + signature
@@ -95,6 +94,40 @@ def send_signed_hello(sock, player_id, session_key, player_signing_priv, scheme)
     protocol.send_frame(sock, ciphertext)
 
     print(f"[player] signed hello sent (scheme: {scheme.upper()})")
+
+# receive a signed message from house
+def receive_house_message(sock, session_key, house_signing_pub, scheme, nonce_tracker):
+    # Pre: sock is connected, session_key is 32 bytes, house_signing_pub is loaded
+    # Post: returns the verified and deserialized message dict
+    ciphertext = protocol.recv_frame(sock)
+
+    bundle = crypto_utils.aes_cbc_decrypt(ciphertext, session_key)
+    msg_bytes, signature = bundle.split(b"||", 1)
+
+    # signature first — never trust any field before authentication
+    if not protocol.verify(msg_bytes, signature, house_signing_pub, scheme):
+        raise ValueError("house signature verification failed")
+
+    msg = protocol.deserialize(msg_bytes)
+
+    if not nonce_tracker.check_and_record(msg["nonce"], msg["timestamp"]):
+        raise ValueError("replay or stale message from house rejected")
+
+    return msg
+
+
+# hand receiving
+def receive_hand(sock, session_key, house_signing_pub, scheme, nonce_tracker):
+    # Pre: session key and house signing key are loaded, nonce tracker is fresh
+    # Post: returns the hand as a list of ints and prints the dealt cards
+    msg = receive_house_message(sock, session_key, house_signing_pub, scheme, nonce_tracker)
+
+    if msg["type"] != protocol.MSG_HAND:
+        raise ValueError(f"expected hand message, got: {msg['type']}")
+
+    hand = msg["payload"]["cards"]
+    print(f"[player] hand received: {hand}")
+    return hand
 
 
 # session key cleanup
@@ -137,8 +170,15 @@ def main():
         session_key = send_session_key(sock, house_oaep_pub)
         send_signed_hello(sock, player_id, session_key, player_signing_priv, scheme)
 
+        nonce_tracker = protocol.NonceTracker()
+        hand = receive_hand(sock, session_key, house_signing_pub, scheme, nonce_tracker)
+
+
     except OSError as e:
         print(f"[player] connection error: {e}")
+
+    except ValueError as e:
+        print(f"[player] protocol error: {e}")
 
     finally:
         destroy_session_key(session_key)
