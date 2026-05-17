@@ -19,7 +19,6 @@ class PlayerSession:
         self.session_key = None
         self.nonce_tracker = protocol.NonceTracker()
         self.hand = None
-        self.played_cards = set()
         self.current_move = None
 
 
@@ -74,6 +73,7 @@ def load_house_signing_key(scheme):
 
     return crypto_utils.load_dsa_private_key(path)
 
+
 def load_player_public_key(player_id, scheme):
     # Pre: player_id and scheme are valid
     # Post: returns the player's public signing key
@@ -98,6 +98,15 @@ def send_signed_message(sock, msg_type, payload, session_key, house_signing_priv
 
     ciphertext = crypto_utils.aes_cbc_encrypt(bundle, session_key)
     protocol.send_frame(sock, ciphertext)
+
+
+# scheme announcement
+def send_scheme_announcement(session, scheme):
+    # Pre: session has an active session key
+    # Post: sends the scheme as an AES-encrypted frame
+    ciphertext = crypto_utils.aes_cbc_encrypt(scheme.encode("utf-8"), session.session_key)
+    protocol.send_frame(session.sock, ciphertext)
+    print(f"[house] {session.player_id} scheme announced: {scheme.upper()}")
 
 
 # session key exchange
@@ -170,15 +179,11 @@ def receive_move(session, player_pub, scheme, round_num):
 
     card = msg["payload"]["card"]
 
-    # Signature checks who sent it, then the hand check makes sure it is legal
+    # signature proves who sent it; hand check proves the card is legal
     if not game_logic.validate_choice(card, session.hand):
         raise ValueError(f"illegal move: {card} not in hand {session.hand}")
 
-    # Prevent the same valid card from being reused in another round
-    if card in session.played_cards:
-        raise ValueError(f"illegal move: {card} already played this game")
-
-    session.played_cards.add(card)
+    session.hand.remove(card)  # card consumed; list shrinks so replay fails validate_choice
     session.current_move = card
     print(f"[house] {session.player_id} played {card} (round {round_num})")
 
@@ -251,6 +256,8 @@ def destroy_session_key(session):
     session.session_key = None
 
     print(f"[house] {session.player_id} session key destroyed")
+
+
 # player handler
 def handle_player(session, game, house_oaep_priv, house_signing_priv, player_pub, scheme):
     # Pre: all keys and session values are valid
@@ -259,6 +266,7 @@ def handle_player(session, game, house_oaep_priv, house_signing_priv, player_pub
 
     try:
         receive_session_key(session, house_oaep_priv)
+        send_scheme_announcement(session, scheme)       # ← encrypted, after session key exists
         receive_signed_hello(session, player_pub, scheme)
         deal_and_send_hand(session, house_signing_priv, scheme)
 
@@ -330,6 +338,7 @@ def main():
         for i in range(config.NUM_PLAYERS):
             client_sock, addr = server_sock.accept()
             player_id = f"player{i + 1}"
+
             # Tell the player which identity/key pair it should use.
             protocol.send_frame(client_sock, player_id.encode("utf-8"))
 
