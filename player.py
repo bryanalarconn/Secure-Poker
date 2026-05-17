@@ -31,7 +31,6 @@ def receive_player_id(sock):
     # Post: returns the assigned player id
     raw = protocol.recv_frame(sock)
     player_id = raw.decode("utf-8")
-
     print(f"[player] assigned identity: {player_id}")
     return player_id
 
@@ -51,21 +50,51 @@ def load_keys(player_id, scheme):
         player_signing_priv = crypto_utils.load_rsa_private_key(
             os.path.join(config.KEYS_DIR, signing_priv_file)
         )
-
         house_signing_pub = crypto_utils.load_rsa_public_key(
             os.path.join(config.KEYS_DIR, house_signing_pub_file)
         )
-
     else:
         player_signing_priv = crypto_utils.load_dsa_private_key(
             os.path.join(config.KEYS_DIR, signing_priv_file)
         )
-
         house_signing_pub = crypto_utils.load_dsa_public_key(
             os.path.join(config.KEYS_DIR, house_signing_pub_file)
         )
 
     return house_oaep_pub, player_signing_priv, house_signing_pub
+
+# session key exchange
+def send_session_key(sock, house_oaep_pub):
+    # Pre: sock is connected and house_oaep_pub is the House RSA-OAEP public key
+    # Post: returns the generated session key and sends its encrypted form to House
+    session_key = os.urandom(config.AES_KEY_SIZE)  # 32 bytes from OS CSPRNG (NIST SP 800-90A)
+
+    encrypted_key = crypto_utils.rsa_oaep_encrypt(session_key, house_oaep_pub)
+    protocol.send_frame(sock, encrypted_key)
+
+    print(f"[player] session key sent ({len(session_key)} bytes, RSA-OAEP encrypted)")
+    return session_key
+
+
+# signed hello
+def send_signed_hello(sock, player_id, session_key, player_signing_priv, scheme):
+    # Pre: sock is connected, session_key is 32 bytes, player_signing_priv is loaded
+    # Post: sends a signed and AES-encrypted hello message to House
+    msg = protocol.build_message(
+        protocol.MSG_SESSION_KEY,
+        player_id,
+        {"player_id": player_id},
+    )
+    msg_bytes = protocol.serialize(msg)
+
+    # sign-then-encrypt: sign the plaintext first, then encrypt the bundle
+    signature = protocol.sign(msg_bytes, player_signing_priv, scheme)
+    bundle = msg_bytes + b"||" + signature
+
+    ciphertext = crypto_utils.aes_cbc_encrypt(bundle, session_key)
+    protocol.send_frame(sock, ciphertext)
+
+    print(f"[player] signed hello sent (scheme: {scheme.upper()})")
 
 
 # session key cleanup
@@ -77,11 +106,9 @@ def destroy_session_key(session_key):
 
     session_key = b"\x00" * config.AES_KEY_SIZE
     del session_key
-
     print("[player] session key destroyed")
 
 
-# main client
 def main():
     # Pre: config has valid server settings and key file names
     # Post: connects to house, loads keys, and shuts down cleanly
@@ -98,19 +125,17 @@ def main():
         print(f"[player] connected to house at {config.HOST}:{config.PORT}")
 
         player_id = receive_player_id(sock)
+        print(f"[player] you are {player_id}")
 
         try:
-            house_oaep_pub, player_signing_priv, house_signing_pub = load_keys(
-                player_id,
-                scheme,
-            )
-
+            house_oaep_pub, player_signing_priv, house_signing_pub = load_keys(player_id, scheme)
             print("[player] keys loaded")
-
         except FileNotFoundError as e:
             print(f"[player] ERROR: missing key file ({e}) - run generate_keys.py first")
             return
 
+        session_key = send_session_key(sock, house_oaep_pub)
+        send_signed_hello(sock, player_id, session_key, player_signing_priv, scheme)
 
     except OSError as e:
         print(f"[player] connection error: {e}")

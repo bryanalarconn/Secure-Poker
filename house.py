@@ -11,14 +11,15 @@ import protocol
 # player session state
 class PlayerSession:
     def __init__(self, player_id, sock, addr):
-        # Pre: player_id is a string, sock is a connected socket, and addr is the peer address
-        # Post: creates a player session with connection details, replay tracking, hand storage, and move storage
+        # Pre: player_id is valid, sock is connected, and addr is the peer address
+        # Post: creates a session for one player
         self.player_id = player_id
         self.sock = sock
         self.addr = addr
         self.session_key = None
         self.nonce_tracker = protocol.NonceTracker()
         self.hand = None
+        self.played_cards = set()
         self.current_move = None
 
 
@@ -26,7 +27,7 @@ class PlayerSession:
 class GameState:
     def __init__(self):
         # Pre: none
-        # Post: creates shared coordination state for both player threads
+        # Post: creates shared state for both player threads
         self.barrier = threading.Barrier(config.NUM_PLAYERS)
         self.round_results = []
         self.winner = None
@@ -56,15 +57,15 @@ def prompt_signature_scheme():
 
 # key loading
 def load_house_oaep_key():
-    # Pre: the house OAEP private key file exists in the keys directory
-    # Post: returns the house RSA private key object
+    # Pre: the house OAEP private key exists
+    # Post: returns the house RSA private key
     path = os.path.join(config.KEYS_DIR, config.HOUSE_OAEP_PRIVATE_KEY)
     return crypto_utils.load_rsa_private_key(path)
 
 
 def load_house_signing_key(scheme):
-    # Pre: scheme is a valid signature scheme and the house signing key file exists
-    # Post: returns the house private signing key object
+    # Pre: scheme is valid and the matching house signing key exists
+    # Post: returns the house private signing key
     filename = f"house_{scheme}_private.pem"
     path = os.path.join(config.KEYS_DIR, filename)
 
@@ -74,7 +75,7 @@ def load_house_signing_key(scheme):
     return crypto_utils.load_dsa_private_key(path)
 
 def load_player_public_key(player_id, scheme):
-    # Pre: player_id is a string and scheme is a valid signature scheme
+    # Pre: player_id and scheme are valid
     # Post: returns the player's public signing key
     filename = f"{player_id}_{scheme}_public.pem"
     path = os.path.join(config.KEYS_DIR, filename)
@@ -87,8 +88,8 @@ def load_player_public_key(player_id, scheme):
 
 # signed message sending
 def send_signed_message(sock, msg_type, payload, session_key, house_signing_priv, scheme):
-    # Pre: sock is connected, session_key is bytes, house_signing_priv is loaded, and scheme is valid
-    # Post: sends a signed and encrypted message over the socket
+    # Pre: socket, session key, signing key, and scheme are valid
+    # Post: sends a signed and encrypted message
     msg = protocol.build_message(msg_type, "house", payload)
     msg_bytes = protocol.serialize(msg)
 
@@ -101,8 +102,8 @@ def send_signed_message(sock, msg_type, payload, session_key, house_signing_priv
 
 # session key exchange
 def receive_session_key(session, house_oaep_priv):
-    # Pre: session is connected and house_oaep_priv is the house RSA private key
-    # Post: stores this player's AES session key in the session
+    # Pre: session socket is connected and the house OAEP key is loaded
+    # Post: stores this player's AES session key
     encrypted_key = protocol.recv_frame(session.sock)
 
     session_key = crypto_utils.rsa_oaep_decrypt(encrypted_key, house_oaep_priv)
@@ -113,8 +114,8 @@ def receive_session_key(session, house_oaep_priv):
 
 # signed hello verification
 def receive_signed_hello(session, player_pub, scheme):
-    # Pre: session has a session key, player_pub is loaded, and scheme is valid
-    # Post: returns the verified hello message dict
+    # Pre: session key is set and the player's public key is loaded
+    # Post: returns the verified hello message
     ciphertext = protocol.recv_frame(session.sock)
 
     bundle = crypto_utils.aes_cbc_decrypt(ciphertext, session.session_key)
@@ -133,8 +134,8 @@ def receive_signed_hello(session, player_pub, scheme):
 
 # hand distribution
 def deal_and_send_hand(session, house_signing_priv, scheme):
-    # Pre: session has a session key, house_signing_priv is loaded, and scheme is valid
-    # Post: stores this player's hand and sends it as a signed encrypted message
+    # Pre: session key is set and the house signing key is loaded
+    # Post: stores and sends this player's hand
     hand = game_logic.deal_hand()
     session.hand = hand
 
@@ -152,8 +153,8 @@ def deal_and_send_hand(session, house_signing_priv, scheme):
 
 # move receiving
 def receive_move(session, player_pub, scheme, round_num):
-    # Pre: session has a session key, hand, and nonce tracker, and player_pub and scheme are valid
-    # Post: stores the player's validated move in the session
+    # Pre: player is set up and has a hand
+    # Post: stores the player's valid move
     ciphertext = protocol.recv_frame(session.sock)
 
     bundle = crypto_utils.aes_cbc_decrypt(ciphertext, session.session_key)
@@ -169,9 +170,15 @@ def receive_move(session, player_pub, scheme, round_num):
 
     card = msg["payload"]["card"]
 
+    # Signature checks who sent it, then the hand check makes sure it is legal
     if not game_logic.validate_choice(card, session.hand):
         raise ValueError(f"illegal move: {card} not in hand {session.hand}")
 
+    # Prevent the same valid card from being reused in another round
+    if card in session.played_cards:
+        raise ValueError(f"illegal move: {card} already played this game")
+
+    session.played_cards.add(card)
     session.current_move = card
     print(f"[house] {session.player_id} played {card} (round {round_num})")
 
@@ -182,6 +189,7 @@ def play_round(session, game, player_pub, house_signing_priv, scheme, round_num)
     # Post: receives the player's move, compares the round, and sends the result
     receive_move(session, player_pub, scheme, round_num)
 
+    # Wait until both players have submitted a move
     game.barrier.wait()
 
     is_leader = session.player_id == "player1"
@@ -195,6 +203,7 @@ def play_round(session, game, player_pub, house_signing_priv, scheme, round_num)
 
         print(f"[house] round {round_num} result: P1={p1_move} P2={p2_move} -> {result}")
 
+    # Wait until the leader has written the result
     game.barrier.wait()
 
     result = game.round_results[round_num - 1]
@@ -210,14 +219,15 @@ def play_round(session, game, player_pub, house_signing_priv, scheme, round_num)
 
 # winner announcement
 def announce_winner(session, game, house_signing_priv, scheme):
-    # Pre: all round results have been stored in game.round_results
-    # Post: sends the signed and encrypted winner message to this player
+    # Pre: all round results are stored
+    # Post: sends the final winner message
     is_leader = session.player_id == "player1"
 
     if is_leader:
         game.winner = game_logic.determine_winner(game.round_results)
         print(f"[house] game over - results {game.round_results} -> winner: {game.winner}")
 
+    # Make sure the winner is set before either thread sends it
     game.barrier.wait()
 
     send_signed_message(
@@ -232,7 +242,7 @@ def announce_winner(session, game, house_signing_priv, scheme):
 
 # session key cleanup
 def destroy_session_key(session):
-    # Pre: session may or may not have an active session key
+    # Pre: session may or may not have a session key
     # Post: clears the session key reference
     if session.session_key is None:
         return
@@ -241,18 +251,10 @@ def destroy_session_key(session):
     session.session_key = None
 
     print(f"[house] {session.player_id} session key destroyed")
-
-# player id assignment
-def send_player_id(session):
-    # Pre: session has a connected socket and an assigned player_id
-    # Post: sends the player_id as a plain UTF-8 frame (before session key exists)
-    protocol.send_frame(session.sock, session.player_id.encode("utf-8"))
-    print(f"[house] assigned {session.player_id}")
-    
 # player handler
 def handle_player(session, game, house_oaep_priv, house_signing_priv, player_pub, scheme):
-    # Pre: session, game, house_oaep_priv, house_signing_priv, player_pub, and scheme are valid
-    # Post: handles the full player session, destroys the key, and closes the socket
+    # Pre: all keys and session values are valid
+    # Post: handles the full player session and closes the socket
     print(f"[house] {session.player_id} connected from {session.addr}")
 
     try:
@@ -328,6 +330,8 @@ def main():
         for i in range(config.NUM_PLAYERS):
             client_sock, addr = server_sock.accept()
             player_id = f"player{i + 1}"
+            # Tell the player which identity/key pair it should use.
+            protocol.send_frame(client_sock, player_id.encode("utf-8"))
 
             session = PlayerSession(player_id, client_sock, addr)
 
