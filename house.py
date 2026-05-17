@@ -242,7 +242,13 @@ def destroy_session_key(session):
 
     print(f"[house] {session.player_id} session key destroyed")
 
-
+# player id assignment
+def send_player_id(session):
+    # Pre: session has a connected socket and an assigned player_id
+    # Post: sends the player_id as a plain UTF-8 frame (before session key exists)
+    protocol.send_frame(session.sock, session.player_id.encode("utf-8"))
+    print(f"[house] assigned {session.player_id}")
+    
 # player handler
 def handle_player(session, game, house_oaep_priv, house_signing_priv, player_pub, scheme):
     # Pre: session, game, house_oaep_priv, house_signing_priv, player_pub, and scheme are valid

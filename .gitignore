@@ -16,3 +16,4 @@ keys/
 .DS_Store
 
 test_client.py
+test_assign.py
