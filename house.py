@@ -29,6 +29,7 @@ class GameState:
         # Post: creates shared coordination state for both player threads
         self.barrier = threading.Barrier(config.NUM_PLAYERS)
         self.round_results = []
+        self.winner = None
         self.p1_session = None
         self.p2_session = None
 
@@ -207,18 +208,63 @@ def play_round(session, game, player_pub, house_signing_priv, scheme, round_num)
         scheme,
     )
 
+# winner announcement
+def announce_winner(session, game, house_signing_priv, scheme):
+    # Pre: all round results have been stored in game.round_results
+    # Post: sends the signed and encrypted winner message to this player
+    is_leader = session.player_id == "player1"
+
+    if is_leader:
+        game.winner = game_logic.determine_winner(game.round_results)
+        print(f"[house] game over - results {game.round_results} -> winner: {game.winner}")
+
+    game.barrier.wait()
+
+    send_signed_message(
+        session.sock,
+        protocol.MSG_WINNER,
+        {"winner": game.winner, "results": game.round_results},
+        session.session_key,
+        house_signing_priv,
+        scheme,
+    )
+
+
+# session key cleanup
+def destroy_session_key(session):
+    # Pre: session may or may not have an active session key
+    # Post: clears the session key reference
+    if session.session_key is None:
+        return
+
+    session.session_key = b"\x00" * config.AES_KEY_SIZE
+    session.session_key = None
+
+    print(f"[house] {session.player_id} session key destroyed")
+
 
 # player handler
 def handle_player(session, game, house_oaep_priv, house_signing_priv, player_pub, scheme):
     # Pre: session, game, house_oaep_priv, house_signing_priv, player_pub, and scheme are valid
-    # Post: handles player setup, one round of play, and closes the socket
+    # Post: handles the full player session, destroys the key, and closes the socket
     print(f"[house] {session.player_id} connected from {session.addr}")
 
     try:
         receive_session_key(session, house_oaep_priv)
         receive_signed_hello(session, player_pub, scheme)
         deal_and_send_hand(session, house_signing_priv, scheme)
-        play_round(session, game, player_pub, house_signing_priv, scheme, 1)
+
+        for round_num in range(1, game_logic.NUM_ROUNDS + 1):
+            play_round(
+                session,
+                game,
+                player_pub,
+                house_signing_priv,
+                scheme,
+                round_num,
+            )
+
+        announce_winner(session, game, house_signing_priv, scheme)
 
     except threading.BrokenBarrierError:
         print(f"[house] {session.player_id} aborted: other player failed")
@@ -231,6 +277,7 @@ def handle_player(session, game, house_oaep_priv, house_signing_priv, player_pub
         game.barrier.abort()
 
     finally:
+        destroy_session_key(session)
         session.sock.close()
         print(f"[house] {session.player_id} disconnected")
 
@@ -238,7 +285,7 @@ def handle_player(session, game, house_oaep_priv, house_signing_priv, player_pub
 # main server
 def main():
     # Pre: config contains valid server settings and key file names
-    # Post: starts the house server, accepts players, runs one round, and shuts down cleanly
+    # Post: starts the house server, runs the game, and shuts down cleanly
     print("[house] Secure Internet Poker - House server")
 
     scheme = prompt_signature_scheme()
