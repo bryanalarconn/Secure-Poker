@@ -178,6 +178,12 @@ def receive_move(session, player_pub, scheme, round_num):
         raise ValueError("replay or stale move rejected")
 
     card = msg["payload"]["card"]
+    move_round = msg["payload"]["round"]
+
+    # the signed round number must match the round the house expects;
+    # this binds the signature to a specific round, not just any move
+    if move_round != round_num:
+        raise ValueError(f"round mismatch: move for round {move_round}, expected {round_num}")
 
     # signature proves who sent it; hand check proves the card is legal
     if not game_logic.validate_choice(card, session.hand):

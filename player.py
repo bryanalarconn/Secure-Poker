@@ -152,13 +152,13 @@ def prompt_card(hand, round_num):
 
 
 # move sending
-def send_move(sock, player_id, card, session_key, player_signing_priv, scheme):
-    # Pre: card is valid, and session/signing keys are ready
+def send_move(sock, player_id, card, round_num, session_key, player_signing_priv, scheme):
+    # Pre: card is valid, round_num is the current round, and session/signing keys are ready
     # Post: sends the player's signed and encrypted move
     msg = protocol.build_message(
         protocol.MSG_MOVE,
         player_id,
-        {"card": card},
+        {"card": card, "round": round_num},
     )
 
     msg_bytes = protocol.serialize(msg)
@@ -205,6 +205,7 @@ def play_round(sock, player_id, hand, session_key, player_signing_priv,
         sock,
         player_id,
         card,
+        round_num,
         session_key,
         player_signing_priv,
         scheme,
